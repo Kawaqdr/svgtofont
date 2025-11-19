@@ -11,7 +11,6 @@ import {
   OtherAssetType
 } from "fantasticon";
 
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -21,7 +20,13 @@ export async function POST(req: NextRequest) {
     const files = formData.getAll("icons") as File[];
 
     if (!files.length) {
-      return new Response("No SVG files uploaded", { status: 400 });
+      return new Response(
+        JSON.stringify({ error: "No SVG files uploaded" }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        }
+      );
     }
 
     // temp dirs in serverless environment (Vercel)
@@ -39,29 +44,29 @@ export async function POST(req: NextRequest) {
 
       const buf = Buffer.from(await f.arrayBuffer());
       const originalSvg = buf.toString("utf8");
-      const scaledSvg = scaleSvg(originalSvg, 24); // or any target size you like
+      const scaledSvg = scaleSvg(originalSvg, 24); // normalize size here
 
       const safeName = f.name.replace(/[^\w.-]/g, "_");
       const targetPath = path.join(iconsDir, safeName);
       await fs.writeFile(targetPath, scaledSvg, "utf8");
     }
 
-    // 2) Run Fantasticon to generate font + assets 1
+    // 2) Run Fantasticon to generate font + assets
+    //    IMPORTANT: no WOFF2 here, so we don't need ttf2woff2.wasm
     await generateFonts({
       inputDir: iconsDir,
       outputDir: outDir,
       name: "custom-icons",
       fontTypes: [
-        FontAssetType.WOFF2,
-        FontAssetType.WOFF,
-        FontAssetType.TTF
+        FontAssetType.TTF,
+        FontAssetType.WOFF // <- WOFF only, no WOFF2
       ],
       assetTypes: [
         OtherAssetType.CSS,
         OtherAssetType.HTML,
         OtherAssetType.JSON
       ],
-      normalize: true, // extra normalization on Fantasticon side
+      normalize: true,
       prefix: "icon",
       tag: "i"
     });
@@ -86,25 +91,27 @@ export async function POST(req: NextRequest) {
 
     await addDirToZip(outDir, zip.folder("font-kit")!);
 
-
-
     const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
 
-// Wrap Buffer in Uint8Array so it matches the `BodyInit` type.
-const body = new Uint8Array(zipBuffer);
+    // Wrap Buffer in Uint8Array so it matches the fetch Response BodyInit type
+    const body = new Uint8Array(zipBuffer);
 
-return new Response(body, {
-  status: 200,
-  headers: {
-    "Content-Type": "application/zip",
-    "Content-Disposition":
-      'attachment; filename="custom-icons-font-kit.zip"'
-  }
-})
-
-    
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition":
+          'attachment; filename="custom-icons-font-kit.zip"'
+      }
+    });
   } catch (err) {
-    console.error(err);
-    return new Response("Internal server error", { status: 500 });
+    console.error("API /api/convert error:", err);
+    return new Response(
+      JSON.stringify({ error: "Internal Server Error" }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      }
+    );
   }
 }
