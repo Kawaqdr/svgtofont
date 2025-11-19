@@ -57,21 +57,20 @@ export async function POST(req: NextRequest) {
       await fs.writeFile(targetPath, scaledSvg, "utf8");
     }
 
-    // 2) Use webfont to generate TTF + WOFF + CSS in memory
+    // 2) Use webfont to generate TTF + WOFF in memory (NO template option)
     const fontName = "custom-icons";
 
     const result = await webfont({
       files: path.join(iconsDir, "*.svg"),
       fontName,
-      formats: ["ttf", "woff"], // no woff2 => no WASM headaches
-      template: "css"
+      formats: ["ttf", "woff"] // no woff2 => no WASM headaches
     });
 
-    if (!result.ttf || !result.woff || !result.template) {
-      throw new Error("Font generation failed (missing outputs)");
+    if (!result.ttf || !result.woff) {
+      throw new Error("Font generation failed (missing TTF/WOFF outputs)");
     }
 
-    // Cast glyphsData to any[] to avoid super strict type complaints
+    // Cast glyphsData to any[] to keep TS happy
     const glyphs = (result.glyphsData || []) as any[];
 
     // 3) Build JSON codepoints map
@@ -84,7 +83,43 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 4) Build a simple HTML preview
+    // 4) Build CSS manually
+    const cssLines: string[] = [];
+
+    cssLines.push(`
+@font-face {
+  font-family: '${fontName}';
+  src: url('./${fontName}.woff') format('woff'),
+       url('./${fontName}.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: block;
+}
+
+.icon {
+  font-family: '${fontName}';
+  font-style: normal;
+  font-weight: normal;
+  speak: none;
+  display: inline-block;
+  text-decoration: none;
+  text-align: center;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+`.trim());
+
+    for (const [name, code] of Object.entries(codepoints)) {
+      const hex = code.toString(16).padStart(4, "0");
+      // content: "\f101" style escape
+      cssLines.push(
+        `.icon-${name}::before { content: "\\${hex}"; }`
+      );
+    }
+
+    const cssContent = cssLines.join("\n\n");
+
+    // 5) Build a simple HTML preview
     const cssFileName = `${fontName}.css`;
     const htmlPreview = `<!DOCTYPE html>
 <html lang="en">
@@ -102,7 +137,7 @@ export async function POST(req: NextRequest) {
 </head>
 <body>
   <h1>${fontName} icons</h1>
-  <p>Use <code>.icon-*</code> classes with the <code>.icon</code> base class.</p>
+  <p>Use <code>.icon</code> plus <code>.icon-*</code> classes.</p>
   <div class="icon-grid">
     ${
       glyphs.length
@@ -124,12 +159,12 @@ export async function POST(req: NextRequest) {
 </body>
 </html>`;
 
-    // 5) Create ZIP with font + CSS + HTML + JSON
+    // 6) Create ZIP with font + CSS + HTML + JSON
     const zip = new JSZip();
 
     zip.file(`${fontName}.ttf`, result.ttf);
     zip.file(`${fontName}.woff`, result.woff);
-    zip.file(cssFileName, result.template);
+    zip.file(cssFileName, cssContent);
     zip.file(`${fontName}.html`, htmlPreview);
     zip.file(`${fontName}.json`, JSON.stringify(codepoints, null, 2));
 
