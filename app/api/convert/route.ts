@@ -4,7 +4,11 @@ import { randomUUID } from "crypto";
 import path from "path";
 import fs from "fs/promises";
 import JSZip from "jszip";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import { scaleSvg } from "@/lib/scaleSvg";
+
+const execFileAsync = promisify(execFile);
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,12 +43,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 👉 Lazy-load fantasticon ONLY inside POST so that:
-    // - Build doesn't try to execute its WASM-stuff
-    // - GET /api/convert stays simple and safe
-    const fantasticon = await import("fantasticon");
-    const { generateFonts, FontAssetType, OtherAssetType } = fantasticon;
-
     // temp dirs in serverless environment (Vercel)
     const root = path.join("/tmp", randomUUID());
     const iconsDir = path.join(root, "icons");
@@ -64,25 +62,35 @@ export async function POST(req: NextRequest) {
       await fs.writeFile(targetPath, scaledSvg, "utf8");
     }
 
-    // 2) Run Fantasticon to generate font + assets
-    // ⚠️ IMPORTANT: we DO NOT use WOFF2 here, to avoid ttf2woff2.wasm issues on Vercel
-    await generateFonts({
-      inputDir: iconsDir,
-      outputDir: outDir,
-      name: "custom-icons",
-      fontTypes: [
-        FontAssetType.TTF,
-        FontAssetType.WOFF // no WOFF2
-      ],
-      assetTypes: [
-        OtherAssetType.CSS,
-        OtherAssetType.HTML,
-        OtherAssetType.JSON
-      ],
-      normalize: true,
-      prefix: "icon",
-      tag: "i"
-    });
+    // 2) Run Fantasticon via CLI (NO import, so no WASM bundling)
+    const cliPath = path.join(
+      process.cwd(),
+      "node_modules",
+      "fantasticon",
+      "bin",
+      "fantasticon.js"
+    );
+
+    const args = [
+      iconsDir,
+      "-o",
+      outDir,
+      "--name",
+      "custom-icons",
+      "--font-types",
+      "ttf,woff", // no woff2 => no ttf2woff2.wasm needed
+      "--asset-types",
+      "css,html,json",
+      "--prefix",
+      "icon",
+      "--tag",
+      "i",
+      "--normalize"
+    ];
+
+    const { stdout, stderr } = await execFileAsync("node", [cliPath, ...args]);
+    if (stdout) console.log("fantasticon stdout:", stdout);
+    if (stderr) console.error("fantasticon stderr:", stderr);
 
     // 3) Zip all generated files and send to client
     const zip = new JSZip();
@@ -105,8 +113,6 @@ export async function POST(req: NextRequest) {
     await addDirToZip(outDir, zip.folder("font-kit")!);
 
     const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
-
-    // Wrap Buffer in Uint8Array so it matches the Response BodyInit type
     const body = new Uint8Array(zipBuffer);
 
     return new Response(body, {
