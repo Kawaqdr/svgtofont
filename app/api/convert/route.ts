@@ -5,21 +5,31 @@ import path from "path";
 import fs from "fs/promises";
 import JSZip from "jszip";
 import { scaleSvg } from "@/lib/scaleSvg";
-import {
-  generateFonts,
-  FontAssetType,
-  OtherAssetType
-} from "fantasticon";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// Simple GET to confirm the route is alive
+export async function GET() {
+  return new Response(
+    JSON.stringify({ status: "ok", message: "convert API ready" }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    }
+  );
+}
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
-    const files = formData.getAll("icons") as File[];
+    const files = formData.getAll("icons") as (File | string)[];
 
-    if (!files.length) {
+    const svgFiles = files.filter(
+      (f) => f instanceof File && f.name.toLowerCase().endsWith(".svg")
+    ) as File[];
+
+    if (!svgFiles.length) {
       return new Response(
         JSON.stringify({ error: "No SVG files uploaded" }),
         {
@@ -28,6 +38,12 @@ export async function POST(req: NextRequest) {
         }
       );
     }
+
+    // 👉 Lazy-load fantasticon ONLY inside POST so that:
+    // - Build doesn't try to execute its WASM-stuff
+    // - GET /api/convert stays simple and safe
+    const fantasticon = await import("fantasticon");
+    const { generateFonts, FontAssetType, OtherAssetType } = fantasticon;
 
     // temp dirs in serverless environment (Vercel)
     const root = path.join("/tmp", randomUUID());
@@ -38,13 +54,10 @@ export async function POST(req: NextRequest) {
     await fs.mkdir(outDir, { recursive: true });
 
     // 1) Save scaled SVGs into /tmp/.../icons
-    for (const f of files) {
-      if (typeof f === "string") continue;
-      if (!f.name.toLowerCase().endsWith(".svg")) continue;
-
+    for (const f of svgFiles) {
       const buf = Buffer.from(await f.arrayBuffer());
       const originalSvg = buf.toString("utf8");
-      const scaledSvg = scaleSvg(originalSvg, 24); // normalize size here
+      const scaledSvg = scaleSvg(originalSvg, 24); // normalize size to 24x24
 
       const safeName = f.name.replace(/[^\w.-]/g, "_");
       const targetPath = path.join(iconsDir, safeName);
@@ -52,14 +65,14 @@ export async function POST(req: NextRequest) {
     }
 
     // 2) Run Fantasticon to generate font + assets
-    //    IMPORTANT: no WOFF2 here, so we don't need ttf2woff2.wasm
+    // ⚠️ IMPORTANT: we DO NOT use WOFF2 here, to avoid ttf2woff2.wasm issues on Vercel
     await generateFonts({
       inputDir: iconsDir,
       outputDir: outDir,
       name: "custom-icons",
       fontTypes: [
         FontAssetType.TTF,
-        FontAssetType.WOFF // <- WOFF only, no WOFF2
+        FontAssetType.WOFF // no WOFF2
       ],
       assetTypes: [
         OtherAssetType.CSS,
@@ -93,7 +106,7 @@ export async function POST(req: NextRequest) {
 
     const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
 
-    // Wrap Buffer in Uint8Array so it matches the fetch Response BodyInit type
+    // Wrap Buffer in Uint8Array so it matches the Response BodyInit type
     const body = new Uint8Array(zipBuffer);
 
     return new Response(body, {
@@ -104,10 +117,13 @@ export async function POST(req: NextRequest) {
           'attachment; filename="custom-icons-font-kit.zip"'
       }
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("API /api/convert error:", err);
     return new Response(
-      JSON.stringify({ error: "Internal Server Error" }),
+      JSON.stringify({
+        error: "Internal Server Error",
+        details: err?.message || String(err)
+      }),
       {
         status: 500,
         headers: { "Content-Type": "application/json" }
