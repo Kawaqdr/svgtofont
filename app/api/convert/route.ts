@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // temp dirs in serverless environment (Vercel)
+    // temp dir in serverless environment (Vercel)
     const root = path.join("/tmp", randomUUID());
     const iconsDir = path.join(root, "icons");
 
@@ -67,19 +67,20 @@ export async function POST(req: NextRequest) {
       template: "css"
     });
 
-    // result: { ttf, woff, svg, eot, woff2, template, glyphsData, ... }
-
     if (!result.ttf || !result.woff || !result.template) {
       throw new Error("Font generation failed (missing outputs)");
     }
 
+    // Cast glyphsData to any[] to avoid super strict type complaints
+    const glyphs = (result.glyphsData || []) as any[];
+
     // 3) Build JSON codepoints map
     const codepoints: Record<string, number> = {};
-    for (const glyph of result.glyphsData || []) {
-      const name = glyph.metadata.name;
-      const unicode = glyph.unicode?.[0];
-      if (name && unicode) {
-        codepoints[name] = unicode.charCodeAt(0);
+    for (const glyph of glyphs) {
+      const name: string | undefined = glyph.metadata?.name;
+      const unicodeChar: string | undefined = glyph.unicode?.[0];
+      if (name && unicodeChar) {
+        codepoints[name] = unicodeChar.charCodeAt(0);
       }
     }
 
@@ -104,17 +105,20 @@ export async function POST(req: NextRequest) {
   <p>Use <code>.icon-*</code> classes with the <code>.icon</code> base class.</p>
   <div class="icon-grid">
     ${
-      (result.glyphsData || [])
-        .map((glyph) => {
-          const name = glyph.metadata.name;
-          const className = `icon-${name}`;
-          return `<div class="icon-item">
+      glyphs.length
+        ? glyphs
+            .map((glyph) => {
+              const name: string | undefined = glyph.metadata?.name;
+              if (!name) return "";
+              const className = `icon-${name}`;
+              return `<div class="icon-item">
   <div class="icon icon-sample ${className}"></div>
   <div>${name}</div>
   <code>${className}</code>
 </div>`;
-        })
-        .join("\n") || "<p>No glyphs found.</p>"
+            })
+            .join("\n")
+        : "<p>No glyphs found.</p>"
     }
   </div>
 </body>
@@ -136,8 +140,7 @@ export async function POST(req: NextRequest) {
       status: 200,
       headers: {
         "Content-Type": "application/zip",
-        "Content-Disposition":
-          `attachment; filename="${fontName}-font-kit.zip"`
+        "Content-Disposition": `attachment; filename="${fontName}-font-kit.zip"`
       }
     });
   } catch (err: any) {
