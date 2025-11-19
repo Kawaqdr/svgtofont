@@ -84,16 +84,23 @@ export async function POST(req: NextRequest) {
 
     await addDirToZip(outDir, zip.folder("font-kit")!);
 
+
+
     const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
 
-    return new Response(zipBuffer, {
-      status: 200,
-      headers: {
-        "Content-Type": "application/zip",
-        "Content-Disposition":
-          'attachment; filename="custom-icons-font-kit.zip"'
-      }
-    });
+// Wrap Buffer in Uint8Array so it matches the `BodyInit` type.
+const body = new Uint8Array(zipBuffer);
+
+return new Response(body, {
+  status: 200,
+  headers: {
+    "Content-Type": "application/zip",
+    "Content-Disposition":
+      'attachment; filename="custom-icons-font-kit.zip"'
+  }
+})
+
+    
   } catch (err) {
     console.error(err);
     return new Response("Internal server error", { status: 500 });
