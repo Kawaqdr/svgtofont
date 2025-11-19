@@ -71,32 +71,32 @@ export async function POST(req: NextRequest) {
         .replace(/\s+/g, "-")
         .replace(/[^a-z0-9_-]/g, "");
 
-    const finalNames: string[] = [];
+    // name -> codepoint map (only icons that actually have unicode)
     const codepoints: Record<string, number> = {};
 
     for (const glyph of glyphs) {
       let name: string | undefined = glyph.metadata?.name;
 
+      // fallback to filename if no metadata name
       if (!name && glyph.srcPath) {
         const base = path.basename(glyph.srcPath, ".svg");
         name = base;
       }
-
       if (!name) continue;
 
       const clean = normalizeName(name);
-      finalNames.push(clean);
-
       const unicodeChar: string | undefined = glyph.unicode?.[0];
-      if (unicodeChar) {
-        codepoints[clean] = unicodeChar.charCodeAt(0);
-      }
+      if (!unicodeChar) continue; // skip glyphs with no unicode
+
+      codepoints[clean] = unicodeChar.charCodeAt(0);
     }
 
-    // Build CSS
-    const cssTree: string[] = [];
+    const iconNames = Object.keys(codepoints);
 
-    cssTree.push(`
+    // Build CSS
+    const cssParts: string[] = [];
+
+    cssParts.push(`
 @font-face {
   font-family: '${fontName}';
   src: url('./${fontName}.woff') format('woff'),
@@ -119,15 +119,15 @@ export async function POST(req: NextRequest) {
 }
 `.trim());
 
-    for (const name of finalNames) {
-      const cp = codepoints[name];
+    for (const name of iconNames) {
+      const cp = codepoints[name]; // now guaranteed defined
       const hex = cp.toString(16).padStart(4, "0");
-      cssTree.push(`.icon-${name}::before { content: "\\${hex}"; }`);
+      cssParts.push(`.icon-${name}::before { content: "\\${hex}"; }`);
     }
 
-    const cssContent = cssTree.join("\n\n");
+    const cssContent = cssParts.join("\n\n");
 
-    // HTML preview
+    // HTML preview only for icons with valid codepoints
     const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -144,7 +144,7 @@ export async function POST(req: NextRequest) {
 <body>
   <h1>${fontName} preview</h1>
   <div class="grid">
-    ${finalNames
+    ${iconNames
       .map(
         (n) => `
       <div class="card">
@@ -158,10 +158,9 @@ export async function POST(req: NextRequest) {
 </body>
 </html>`;
 
-    // Build ZIP (TS-safe)
+    // Build ZIP
     const zip = new JSZip();
-
-    const ttfBuffer = result.ttf as Buffer; // we checked above
+    const ttfBuffer = result.ttf as Buffer;
     const woffBuffer = result.woff as Buffer;
 
     zip.file(`${fontName}.ttf`, ttfBuffer);
