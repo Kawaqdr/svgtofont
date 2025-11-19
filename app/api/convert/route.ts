@@ -42,15 +42,11 @@ export async function POST(req: NextRequest) {
     await fs.mkdir(iconsDir, { recursive: true });
 
     // Save scaled SVGs
-    const fileNameMap: Record<string, string> = {};
-
     for (const f of svgFiles) {
       const buf = Buffer.from(await f.arrayBuffer());
       const scaled = scaleSvg(buf.toString("utf8"), 24);
 
       const safeName = f.name.replace(/[^\w.-]/g, "_");
-      fileNameMap[safeName] = f.name; // original -> real name
-
       await fs.writeFile(path.join(iconsDir, safeName), scaled, "utf8");
     }
 
@@ -63,9 +59,12 @@ export async function POST(req: NextRequest) {
       formats: ["ttf", "woff"]
     });
 
+    if (!result.ttf || !result.woff) {
+      throw new Error("Font generation failed (missing TTF/WOFF outputs)");
+    }
+
     const glyphs = (result.glyphsData || []) as any[];
 
-    // Generate names: metadata.name → file name fallback → guaranteed safe name
     const normalizeName = (name: string) =>
       name
         .toLowerCase()
@@ -73,14 +72,11 @@ export async function POST(req: NextRequest) {
         .replace(/[^a-z0-9_-]/g, "");
 
     const finalNames: string[] = [];
-
     const codepoints: Record<string, number> = {};
 
     for (const glyph of glyphs) {
-      // Try metadata
       let name: string | undefined = glyph.metadata?.name;
 
-      // If missing, fallback to real filename
       if (!name && glyph.srcPath) {
         const base = path.basename(glyph.srcPath, ".svg");
         name = base;
@@ -98,7 +94,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Build CSS
-    const cssTree = [];
+    const cssTree: string[] = [];
 
     cssTree.push(`
 @font-face {
@@ -126,7 +122,6 @@ export async function POST(req: NextRequest) {
     for (const name of finalNames) {
       const cp = codepoints[name];
       const hex = cp.toString(16).padStart(4, "0");
-
       cssTree.push(`.icon-${name}::before { content: "\\${hex}"; }`);
     }
 
@@ -163,10 +158,14 @@ export async function POST(req: NextRequest) {
 </body>
 </html>`;
 
-    // Build ZIP
+    // Build ZIP (TS-safe)
     const zip = new JSZip();
-    zip.file(`${fontName}.ttf`, result.ttf);
-    zip.file(`${fontName}.woff`, result.woff);
+
+    const ttfBuffer = result.ttf as Buffer; // we checked above
+    const woffBuffer = result.woff as Buffer;
+
+    zip.file(`${fontName}.ttf`, ttfBuffer);
+    zip.file(`${fontName}.woff`, woffBuffer);
     zip.file(`${fontName}.css`, cssContent);
     zip.file(`${fontName}.html`, html);
     zip.file(`${fontName}.json`, JSON.stringify(codepoints, null, 2));
