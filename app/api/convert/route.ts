@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
       await fs.writeFile(targetPath, scaledSvg, "utf8");
     }
 
-    // 2) Use webfont to generate TTF + WOFF in memory (NO template option)
+    // 2) Use webfont to generate TTF + WOFF in memory
     const fontName = "custom-icons";
 
     const result = await webfont({
@@ -73,17 +73,31 @@ export async function POST(req: NextRequest) {
     // Cast glyphsData to any[] to keep TS happy
     const glyphs = (result.glyphsData || []) as any[];
 
-    // 3) Build JSON codepoints map
+    // Helper to get a clean icon name from glyph data
+    const getGlyphName = (glyph: any): string | null => {
+      const metaName: string | undefined = glyph.metadata?.name;
+      if (metaName && metaName.trim()) return metaName.trim();
+
+      // fallback: derive from source path if available
+      const srcPath: string | undefined = glyph.srcPath;
+      if (srcPath) {
+        const base = path.basename(srcPath, path.extname(srcPath));
+        if (base) return base;
+      }
+      return null;
+    };
+
+    // 3) Build JSON codepoints map (name -> unicode codepoint)
     const codepoints: Record<string, number> = {};
     for (const glyph of glyphs) {
-      const name: string | undefined = glyph.metadata?.name;
+      const name = getGlyphName(glyph);
       const unicodeChar: string | undefined = glyph.unicode?.[0];
       if (name && unicodeChar) {
         codepoints[name] = unicodeChar.charCodeAt(0);
       }
     }
 
-    // 4) Build CSS manually
+    // 4) Build CSS manually, one rule per icon name
     const cssLines: string[] = [];
 
     cssLines.push(`
@@ -111,7 +125,6 @@ export async function POST(req: NextRequest) {
 
     for (const [name, code] of Object.entries(codepoints)) {
       const hex = code.toString(16).padStart(4, "0");
-      // content: "\f101" style escape
       cssLines.push(
         `.icon-${name}::before { content: "\\${hex}"; }`
       );
@@ -143,7 +156,7 @@ export async function POST(req: NextRequest) {
       glyphs.length
         ? glyphs
             .map((glyph) => {
-              const name: string | undefined = glyph.metadata?.name;
+              const name = getGlyphName(glyph);
               if (!name) return "";
               const className = `icon-${name}`;
               return `<div class="icon-item">
