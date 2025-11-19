@@ -4,11 +4,8 @@ import { randomUUID } from "crypto";
 import path from "path";
 import fs from "fs/promises";
 import JSZip from "jszip";
-import { execFile } from "child_process";
-import { promisify } from "util";
+import webfont from "webfont";
 import { scaleSvg } from "@/lib/scaleSvg";
-
-const execFileAsync = promisify(execFile);
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,12 +43,10 @@ export async function POST(req: NextRequest) {
     // temp dirs in serverless environment (Vercel)
     const root = path.join("/tmp", randomUUID());
     const iconsDir = path.join(root, "icons");
-    const outDir = path.join(root, "dist");
 
     await fs.mkdir(iconsDir, { recursive: true });
-    await fs.mkdir(outDir, { recursive: true });
 
-    // 1) Save scaled SVGs into /tmp/.../icons
+    // 1) Save *scaled* SVGs into /tmp/.../icons
     for (const f of svgFiles) {
       const buf = Buffer.from(await f.arrayBuffer());
       const originalSvg = buf.toString("utf8");
@@ -62,55 +57,77 @@ export async function POST(req: NextRequest) {
       await fs.writeFile(targetPath, scaledSvg, "utf8");
     }
 
-    // 2) Run Fantasticon via CLI (NO import, so no WASM bundling)
-    const cliPath = path.join(
-      process.cwd(),
-      "node_modules",
-      "fantasticon",
-      "bin",
-      "fantasticon.js"
-    );
+    // 2) Use webfont to generate TTF + WOFF + CSS in memory
+    const fontName = "custom-icons";
 
-    const args = [
-      iconsDir,
-      "-o",
-      outDir,
-      "--name",
-      "custom-icons",
-      "--font-types",
-      "ttf,woff", // no woff2 => no ttf2woff2.wasm needed
-      "--asset-types",
-      "css,html,json",
-      "--prefix",
-      "icon",
-      "--tag",
-      "i",
-      "--normalize"
-    ];
+    const result = await webfont({
+      files: path.join(iconsDir, "*.svg"),
+      fontName,
+      formats: ["ttf", "woff"], // no woff2 => no WASM headaches
+      template: "css"
+    });
 
-    const { stdout, stderr } = await execFileAsync("node", [cliPath, ...args]);
-    if (stdout) console.log("fantasticon stdout:", stdout);
-    if (stderr) console.error("fantasticon stderr:", stderr);
+    // result: { ttf, woff, svg, eot, woff2, template, glyphsData, ... }
 
-    // 3) Zip all generated files and send to client
-    const zip = new JSZip();
+    if (!result.ttf || !result.woff || !result.template) {
+      throw new Error("Font generation failed (missing outputs)");
+    }
 
-    async function addDirToZip(dirPath: string, zipFolder: JSZip) {
-      const entries = await fs.readdir(dirPath, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dirPath, entry.name);
-        if (entry.isDirectory()) {
-          const folder = zipFolder.folder(entry.name);
-          if (!folder) continue;
-          await addDirToZip(fullPath, folder);
-        } else {
-          const fileData = await fs.readFile(fullPath);
-          zipFolder.file(entry.name, fileData);
-        }
+    // 3) Build JSON codepoints map
+    const codepoints: Record<string, number> = {};
+    for (const glyph of result.glyphsData || []) {
+      const name = glyph.metadata.name;
+      const unicode = glyph.unicode?.[0];
+      if (name && unicode) {
+        codepoints[name] = unicode.charCodeAt(0);
       }
     }
 
-    await addDirToZip(outDir, zip.folder("font-kit")!);
+    // 4) Build a simple HTML preview
+    const cssFileName = `${fontName}.css`;
+    const htmlPreview = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>${fontName} preview</title>
+  <link rel="stylesheet" href="./${cssFileName}" />
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 16px; background:#020617; color:#e5e7eb; }
+    .icon-grid { display:flex; flex-wrap:wrap; gap:16px; }
+    .icon-item { width:120px; border:1px solid #1f2937; border-radius:8px; padding:8px; text-align:center; background:#020617; }
+    .icon-sample { font-size:32px; margin-bottom:4px; }
+    code { font-size:12px; word-break:break-all; }
+  </style>
+</head>
+<body>
+  <h1>${fontName} icons</h1>
+  <p>Use <code>.icon-*</code> classes with the <code>.icon</code> base class.</p>
+  <div class="icon-grid">
+    ${
+      (result.glyphsData || [])
+        .map((glyph) => {
+          const name = glyph.metadata.name;
+          const className = `icon-${name}`;
+          return `<div class="icon-item">
+  <div class="icon icon-sample ${className}"></div>
+  <div>${name}</div>
+  <code>${className}</code>
+</div>`;
+        })
+        .join("\n") || "<p>No glyphs found.</p>"
+    }
+  </div>
+</body>
+</html>`;
+
+    // 5) Create ZIP with font + CSS + HTML + JSON
+    const zip = new JSZip();
+
+    zip.file(`${fontName}.ttf`, result.ttf);
+    zip.file(`${fontName}.woff`, result.woff);
+    zip.file(cssFileName, result.template);
+    zip.file(`${fontName}.html`, htmlPreview);
+    zip.file(`${fontName}.json`, JSON.stringify(codepoints, null, 2));
 
     const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
     const body = new Uint8Array(zipBuffer);
@@ -120,7 +137,7 @@ export async function POST(req: NextRequest) {
       headers: {
         "Content-Type": "application/zip",
         "Content-Disposition":
-          'attachment; filename="custom-icons-font-kit.zip"'
+          `attachment; filename="${fontName}-font-kit.zip"`
       }
     });
   } catch (err: any) {
